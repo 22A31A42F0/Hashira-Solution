@@ -1,0 +1,211 @@
+// polynomial_bigint.js
+// Node.js (no external libraries) — exact arithmetic with BigInt fractions.
+
+// ---- Input (your JSON) ----
+const input = {
+  "keys": {
+    "n": 10,
+    "k": 7
+  },
+  "1": {
+    "base": "6",
+    "value": "13444211440455345511"
+  },
+  "2": {
+    "base": "15",
+    "value": "aed7015a346d635"
+  },
+  "3": {
+    "base": "15",
+    "value": "6aeeb69631c227c"
+  },
+  "4": {
+    "base": "16",
+    "value": "e1b5e05623d881f"
+  },
+  "5": {
+    "base": "8",
+    "value": "316034514573652620673"
+  },
+  "6": {
+    "base": "3",
+    "value": "2122212201122002221120200210011020220200"
+  },
+  "7": {
+    "base": "3",
+    "value": "20120221122211000100210021102001201112121"
+  },
+  "8": {
+    "base": "6",
+    "value": "20220554335330240002224253"
+  },
+  "9": {
+    "base": "12",
+    "value": "45153788322a1255483"
+  },
+  "10": {
+    "base": "7",
+    "value": "1101613130313526312514143"
+  }
+};
+
+// ---- Utilities ----
+function charToDigit(c) {
+  const lc = c.toLowerCase();
+  if (lc >= '0' && lc <= '9') return lc.charCodeAt(0) - 48;
+  if (lc >= 'a' && lc <= 'z') return 10 + (lc.charCodeAt(0) - 97);
+  throw new Error("Invalid digit char: " + c);
+}
+
+function parseBaseToBigInt(str, base) {
+  const B = BigInt(base);
+  let s = str.trim();
+  let sign = 1n;
+  if (s[0] === '-') { sign = -1n; s = s.slice(1); }
+  let acc = 0n;
+  for (let ch of s) {
+    const d = BigInt(charToDigit(ch));
+    if (d >= B) throw new Error(`Digit ${ch} not valid for base ${base}`);
+    acc = acc * B + d;
+  }
+  return acc * sign;
+}
+
+// BigInt gcd
+function bgcd(a, b) {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b !== 0n) {
+    const r = a % b;
+    a = b;
+    b = r;
+  }
+  return a;
+}
+
+// Fraction with BigInt numerator/denominator (always normalized)
+class Frac {
+  constructor(num, den = 1n) {
+    if (den === 0n) throw new Error("Zero denominator");
+    if (den < 0n) { num = -num; den = -den; }
+    const g = bgcd(num, den);
+    this.num = num / g;
+    this.den = den / g;
+  }
+  static zero() { return new Frac(0n, 1n); }
+  static one() { return new Frac(1n, 1n); }
+
+  add(other) {
+    const n = this.num * other.den + other.num * this.den;
+    const d = this.den * other.den;
+    return new Frac(n, d);
+  }
+  sub(other) {
+    const n = this.num * other.den - other.num * this.den;
+    const d = this.den * other.den;
+    return new Frac(n, d);
+  }
+  mul(other) {
+    return new Frac(this.num * other.num, this.den * other.den);
+  }
+  div(other) {
+    if (other.num === 0n) throw new Error("Division by zero frac");
+    return new Frac(this.num * other.den, this.den * other.num);
+  }
+  isZero() { return this.num === 0n; }
+  toString() {
+    if (this.den === 1n) return this.num.toString();
+    return `${this.num.toString()}/${this.den.toString()}`;
+  }
+}
+
+// ---- Parse points ----
+const points = [];
+for (const key of Object.keys(input)) {
+  if (key === "keys") continue;
+  const x = BigInt(parseInt(key, 10));
+  const { base, value } = input[key];
+  const y = parseBaseToBigInt(value, parseInt(base, 10));
+  points.push({ x, y });
+}
+// sort by x just in case JSON ordering differs (ensures consistent first k)
+points.sort((a,b) => (a.x < b.x ? -1 : a.x > b.x ? 1 : 0));
+
+// helper: build Vandermonde matrix for given subset of points
+function buildAugmentedMatrix(ptSubset) {
+  const k = ptSubset.length;
+  // matrix rows: k, columns: k+1 (last is RHS)
+  const M = Array.from({length: k}, () => Array(k+1).fill(Frac.zero()));
+  for (let i = 0; i < k; ++i) {
+    const xi = ptSubset[i].x;
+    let pow = 1n;
+    for (let j = 0; j < k; ++j) {
+      M[i][j] = new Frac(pow, 1n);
+      pow = pow * xi;
+    }
+    M[i][k] = new Frac(ptSubset[i].y, 1n); // RHS
+  }
+  return M;
+}
+
+// Solve exact linear system via Gauss-Jordan to reduced row echelon
+function solveExact(M) {
+  const n = M.length;
+  const m = n; // n x (n+1)
+  for (let col = 0; col < n; ++col) {
+    // find pivot row with non-zero in column col (at or below col)
+    let pivot = -1;
+    for (let r = col; r < n; ++r) {
+      if (!M[r][col].isZero()) { pivot = r; break; }
+    }
+    if (pivot === -1) throw new Error("Matrix singular (no pivot)");
+    // swap rows if needed
+    if (pivot !== col) {
+      const tmp = M[col]; M[col] = M[pivot]; M[pivot] = tmp;
+    }
+    // normalize pivot row so pivot becomes 1
+    const pivotVal = M[col][col];
+    for (let c = col; c <= n; ++c) {
+      M[col][c] = M[col][c].div(pivotVal);
+    }
+    // eliminate other rows' entries in this column
+    for (let r = 0; r < n; ++r) {
+      if (r === col) continue;
+      const factor = M[r][col];
+      if (factor.isZero()) continue;
+      for (let c = col; c <= n; ++c) {
+        M[r][c] = M[r][c].sub(factor.mul(M[col][c]));
+      }
+    }
+  }
+  // after RREF, solution is last column
+  const sol = [];
+  for (let i = 0; i < n; ++i) sol.push(M[i][n]);
+  return sol;
+}
+
+// Compute constants for degree (k-1) and degree (n-1)
+function computeConstantForK(k) {
+  if (points.length < k) throw new Error("Insufficient points");
+  const subset = points.slice(0, k); // first k points
+  const M = buildAugmentedMatrix(subset);
+  const sol = solveExact(M); // array of Frac
+  // a0 is sol[0]
+  const a0 = sol[0];
+  // Return as integer string if denominator is 1, else as fraction string
+  return a0.toString();
+}
+
+// run for k=input.keys.k (degree k-1)
+const k = input.keys.k;
+const a0_k = computeConstantForK(k);
+
+// optional: full interpolation degree n-1 (use all points)
+const a0_all = computeConstantForK(points.length);
+
+// Print results
+console.log(`Constant term a0 for degree ${k-1} polynomial (first ${k} points):`);
+console.log(a0_k);
+console.log();
+console.log(`Constant term a0 for degree ${points.length-1} polynomial (all ${points.length} points):`);
+console.log(a0_all);
